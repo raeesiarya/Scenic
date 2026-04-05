@@ -17,6 +17,7 @@ SCENIC_TEST_STRAIGHT = "examples/scenic_tests/case_straight/main.scenic"
 SCENIC_TEST_SCENARIO = "examples/scenic_tests/case_scenario/main.scenic"
 SCENIC_TEST_INTERRUPT = "examples/scenic_tests/case_interrupt_temporal/main.scenic"
 SCENIC_TEST_MONITOR = "examples/scenic_tests/case_monitor_require/main.scenic"
+SCENIC_TEST_WEIGHTED_SHUFFLE = "examples/scenic_tests/case_weighted_shuffle/main.scenic"
 
 
 GRAPH_CASES = [
@@ -1103,6 +1104,66 @@ def test_case_monitor_require_parses_behavior_graph_without_breaking():
     trace = sample_from_graph(graph)
     assert trace[0] == "BranchBehavior"
     assert trace[1] in {"LeafA", "LeafB"}
+
+
+def test_case_weighted_shuffle_preserves_weights_in_graph_and_compact_export():
+    graph = analyze_scenic_composition(SCENIC_TEST_WEIGHTED_SHUFFLE)
+    compact = build_compact_graph_dict(graph)
+
+    assert graph.container_names == (
+        "<initial>",
+        "MainBehavior",
+        "WeightedShuffle",
+        "HeavyLeaf",
+        "LightLeaf",
+    )
+    assert [statement.container_name for statement in graph.statements] == [
+        "MainBehavior",
+        "WeightedShuffle",
+    ]
+    assert [statement.operator for statement in graph.statements] == [
+        "parallel",
+        "shuffle",
+    ]
+    weighted_shuffle = graph.statements[1]
+    assert [inv.target for inv in weighted_shuffle.invocations] == [
+        "HeavyLeaf",
+        "LightLeaf",
+    ]
+    assert [inv.weight for inv in weighted_shuffle.invocations] == [3.0, 1.0]
+
+    compact_edges = {
+        (edge["source"], edge["target"], edge["type"]): edge
+        for edge in compact["edges"]
+    }
+    assert compact["nodes"]["X:WeightedShuffle:1"] == {
+        "type": "X",
+        "op": "shuffle",
+        "container": "WeightedShuffle",
+    }
+    assert compact_edges[
+        ("X:WeightedShuffle:1", "O:WeightedShuffle:1:invocation:0", "X_to_O")
+    ]["weight"] == 3.0
+    assert compact_edges[
+        ("X:WeightedShuffle:1", "O:WeightedShuffle:1:invocation:1", "X_to_O")
+    ]["weight"] == 1.0
+
+
+def test_case_weighted_shuffle_sampling_biases_heavier_item_earlier():
+    graph = analyze_scenic_composition(SCENIC_TEST_WEIGHTED_SHUFFLE)
+
+    heavy_first = 0
+    light_first = 0
+    for _ in range(400):
+        trace = sample_from_graph(graph)
+        assert trace[0] == "WeightedShuffle"
+        assert set(trace[1:3]) == {"HeavyLeaf", "LightLeaf"}
+        if trace[1] == "HeavyLeaf":
+            heavy_first += 1
+        else:
+            light_first += 1
+
+    assert heavy_first > light_first
 
 
 def test_analyze_scenic_composition_includes_local_scenic_imports(tmp_path):

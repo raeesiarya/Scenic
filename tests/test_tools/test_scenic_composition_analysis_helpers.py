@@ -24,6 +24,7 @@ from tools.scenic_composition_analysis_helpers import (
     sample_composition,
     sort_node_ids,
     target_name,
+    weighted_shuffle_invocations,
 )
 
 SCENIC_TEST_MAIN = Path("examples/scenic_tests/case_interconnected/main.scenic")
@@ -43,6 +44,9 @@ SCENIC_TEST_INTERRUPT_MAIN = Path(
 )
 SCENIC_TEST_MONITOR_MAIN = Path(
     "examples/scenic_tests/case_monitor_require/main.scenic"
+)
+SCENIC_TEST_WEIGHTED_SHUFFLE_MAIN = Path(
+    "examples/scenic_tests/case_weighted_shuffle/main.scenic"
 )
 
 
@@ -496,6 +500,34 @@ def test_extract_from_parser_tolerates_monitor_require_case_and_collects_behavio
     ]
 
 
+def test_extract_from_parser_captures_weighted_shuffle_case():
+    containers, statements = extract_from_parser(
+        SCENIC_TEST_WEIGHTED_SHUFFLE_MAIN.read_text()
+    )
+
+    assert [container.name for container in containers] == [
+        "<initial>",
+        "MainBehavior",
+        "WeightedShuffle",
+        "HeavyLeaf",
+        "LightLeaf",
+    ]
+    assert [statement.container_name for statement in statements] == [
+        "MainBehavior",
+        "WeightedShuffle",
+    ]
+    assert [statement.operator for statement in statements] == [
+        "parallel",
+        "shuffle",
+    ]
+    assert [inv.target for inv in statements[1].invocations] == [
+        "HeavyLeaf",
+        "LightLeaf",
+    ]
+    assert [inv.weight for inv in statements[1].invocations] == [3.0, 1.0]
+    assert all(inv.is_weighted for inv in statements[1].invocations)
+
+
 def test_target_name_and_parse_weight_helpers():
     assert target_name("FollowLaneBehavior(speed)") == "FollowLaneBehavior"
     assert target_name("CollisionAvoidance()") == "CollisionAvoidance"
@@ -745,3 +777,63 @@ def test_sample_composition_choose_and_shuffle(monkeypatch):
 
     assert sample_composition(choose_composition, invocations) == ["B"]
     assert sample_composition(shuffle_composition, invocations) == ["B", "A"]
+
+
+def test_weighted_shuffle_invocations_uses_weighted_sampling_without_replacement(
+    monkeypatch,
+):
+    invocation_nodes = {
+        "a": GraphNode(id="a", kind="invocation", label="A", attributes={"weight": 3.0}),
+        "b": GraphNode(id="b", kind="invocation", label="B", attributes={"weight": 1.0}),
+        "c": GraphNode(id="c", kind="invocation", label="C", attributes={"weight": 2.0}),
+    }
+    calls = []
+
+    def fake_choices(population, weights, k):
+        calls.append((list(population), list(weights), k))
+        return [population[0]]
+
+    monkeypatch.setattr("tools.scenic_composition_analysis_helpers.random.choices", fake_choices)
+
+    assert weighted_shuffle_invocations(["a", "b", "c"], invocation_nodes) == [
+        "a",
+        "b",
+        "c",
+    ]
+    assert calls == [
+        (["a", "b", "c"], [3.0, 1.0, 2.0], 1),
+        (["b", "c"], [1.0, 2.0], 1),
+        (["c"], [2.0], 1),
+    ]
+
+
+def test_sample_composition_weighted_shuffle_prefers_heavier_item_first():
+    composition = {
+        "node": GraphNode(id="Foo:1", kind="composition", label="shuffle"),
+        "invocation_ids": ["heavy", "light"],
+    }
+    invocations = {
+        "heavy": GraphNode(
+            id="heavy",
+            kind="invocation",
+            label="Heavy",
+            attributes={"target": "Heavy", "weight": 3.0},
+        ),
+        "light": GraphNode(
+            id="light",
+            kind="invocation",
+            label="Light",
+            attributes={"target": "Light", "weight": 1.0},
+        ),
+    }
+
+    heavy_first = 0
+    light_first = 0
+    for _ in range(400):
+        sampled = sample_composition(composition, invocations)
+        if sampled[0] == "Heavy":
+            heavy_first += 1
+        else:
+            light_first += 1
+
+    assert heavy_first > light_first

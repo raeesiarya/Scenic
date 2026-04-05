@@ -490,8 +490,7 @@ def sample_composition(
     elif operator == "choose":
         chosen = [choose_invocation(invocation_ids, invocation_nodes)]
     elif operator == "shuffle":
-        chosen = invocation_ids
-        random.shuffle(chosen)
+        chosen = weighted_shuffle_invocations(invocation_ids, invocation_nodes)
     else:
         raise ValueError(f"unknown operator {operator!r}")
 
@@ -518,6 +517,40 @@ def choose_invocation(
         normalized = [weight if weight is not None else 1.0 for weight in weights]
         return random.choices(list(invocation_ids), weights=normalized, k=1)[0]
     return random.choice(list(invocation_ids))
+
+
+def weighted_shuffle_invocations(
+    invocation_ids: Sequence[str], invocation_nodes: Dict[str, GraphNode]
+) -> List[str]:
+    """Produce a random permutation of invocation IDs.
+
+    If any invocation has a weight, use weighted sampling without replacement
+    so heavier branches are more likely to appear earlier in the permutation.
+    """
+
+    remaining = list(invocation_ids)
+    weights = {
+        node_id: invocation_nodes[node_id].attributes.get("weight")
+        for node_id in remaining
+    }
+    if not any(weight is not None for weight in weights.values()):
+        shuffled = list(remaining)
+        random.shuffle(shuffled)
+        return shuffled
+
+    ordered: List[str] = []
+    while remaining:
+        numeric_weights = [
+            max(0.0, float(weights[node_id] if weights[node_id] is not None else 1.0))
+            for node_id in remaining
+        ]
+        if sum(numeric_weights) > 0:
+            chosen = random.choices(remaining, weights=numeric_weights, k=1)[0]
+        else:
+            chosen = random.choice(remaining)
+        ordered.append(chosen)
+        remaining.remove(chosen)
+    return ordered
 
 
 def invocation_result(invocation: GraphNode) -> str:
