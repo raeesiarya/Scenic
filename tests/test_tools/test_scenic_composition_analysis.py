@@ -14,6 +14,9 @@ from tools.scenic_composition_analysis import (
 
 SCENIC_TEST_MAIN = "examples/scenic_tests/case_interconnected/main.scenic"
 SCENIC_TEST_STRAIGHT = "examples/scenic_tests/case_straight/main.scenic"
+SCENIC_TEST_SCENARIO = "examples/scenic_tests/case_scenario/main.scenic"
+SCENIC_TEST_INTERRUPT = "examples/scenic_tests/case_interrupt_temporal/main.scenic"
+SCENIC_TEST_MONITOR = "examples/scenic_tests/case_monitor_require/main.scenic"
 
 
 GRAPH_CASES = [
@@ -952,6 +955,154 @@ def test_case_straight_analysis_output_includes_linear_chain():
         for edge in output["compact_graph"]["edges"]
     )
     assert output["sample_trace"][0] == "LocalStart"
+
+
+def test_case_scenario_builds_scenario_and_behavior_graph():
+    graph = analyze_scenic_composition(SCENIC_TEST_SCENARIO)
+
+    assert graph.container_names == (
+        "<initial>",
+        "Main",
+        "LocalScenario",
+        "AlternateScenario",
+        "LocalBehavior",
+        "ImportedBehavior",
+        "ImportedScenario",
+        "ImportedLeaf",
+    )
+    assert [statement.container_name for statement in graph.statements] == [
+        "Main",
+        "Main",
+        "LocalScenario",
+        "AlternateScenario",
+        "ImportedBehavior",
+        "ImportedScenario",
+    ]
+    assert [statement.operator for statement in graph.statements] == [
+        "parallel",
+        "choose",
+        "parallel",
+        "parallel",
+        "parallel",
+        "parallel",
+    ]
+
+
+def test_case_scenario_compact_graph_links_scenarios_and_behaviors():
+    graph = analyze_scenic_composition(SCENIC_TEST_SCENARIO)
+    compact = build_compact_graph_dict(graph)
+
+    assert compact["nodes"]["S:scenario:Main"]["type"] == "S"
+    assert compact["nodes"]["S:scenario:ImportedScenario"]["type"] == "S"
+    assert compact["nodes"]["X:Main:2"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "Main",
+    }
+    compact_edges = {
+        (edge["source"], edge["target"], edge["type"]): edge
+        for edge in compact["edges"]
+    }
+    assert (
+        "O:Main:1:invocation:0",
+        "S:scenario:ImportedScenario",
+        "O_targets_S",
+    ) in compact_edges
+    assert (
+        "O:ImportedScenario:1:invocation:0",
+        "S:behavior:ImportedBehavior",
+        "O_targets_S",
+    ) in compact_edges
+    assert compact_edges[("X:Main:2", "O:Main:2:invocation:0", "X_to_O")][
+        "probability"
+    ] == 0.5
+    assert compact_edges[("X:Main:2", "O:Main:2:invocation:1", "X_to_O")][
+        "probability"
+    ] == 0.5
+
+
+def test_case_scenario_sample_trace_reaches_imported_and_local_scenarios():
+    graph = analyze_scenic_composition(SCENIC_TEST_SCENARIO)
+
+    local_choices = set()
+    for _ in range(40):
+        trace = sample_from_graph(graph)
+        assert trace[:3] == ["ImportedScenario", "ImportedBehavior", "ImportedLeaf"]
+        assert trace[3] in {"LocalScenario", "AlternateScenario"}
+        assert trace[4] == "LocalBehavior"
+        local_choices.add(trace[3])
+
+    assert local_choices == {"LocalScenario", "AlternateScenario"}
+
+
+def test_case_interrupt_temporal_captures_try_until_and_for():
+    graph = analyze_scenic_composition(SCENIC_TEST_INTERRUPT)
+    execution = build_execution_structure(graph)
+    compact = build_compact_graph_dict(graph)
+
+    assert graph.container_names == (
+        "<initial>",
+        "MainBehavior",
+        "BaseBehavior",
+        "InterruptBehavior",
+        "TimedBehavior",
+    )
+    assert [statement.operator for statement in graph.statements] == [
+        "parallel",
+        "until",
+        "for",
+    ]
+    assert [statement.nesting for statement in graph.statements] == [
+        ("try",),
+        ("try", "interrupt when simulation().currentTime > 1"),
+        ("try", "interrupt when simulation().currentTime > 1"),
+    ]
+    assert execution.compositions["MainBehavior:1"]["next_ids"] == ["MainBehavior:2"]
+    assert execution.compositions["MainBehavior:2"]["next_ids"] == ["MainBehavior:3"]
+    assert compact["nodes"]["X:MainBehavior:2"] == {
+        "type": "X",
+        "op": "until",
+        "container": "MainBehavior",
+    }
+    assert compact["nodes"]["X:MainBehavior:3"] == {
+        "type": "X",
+        "op": "for",
+        "container": "MainBehavior",
+    }
+    assert sample_from_graph(graph) == [
+        "BaseBehavior",
+        "InterruptBehavior",
+        "TimedBehavior",
+    ]
+
+
+def test_case_monitor_require_parses_behavior_graph_without_breaking():
+    graph = analyze_scenic_composition(SCENIC_TEST_MONITOR)
+    compact = build_compact_graph_dict(graph)
+
+    assert graph.container_names == (
+        "<initial>",
+        "MainBehavior",
+        "BranchBehavior",
+        "LeafA",
+        "LeafB",
+    )
+    assert [statement.container_name for statement in graph.statements] == [
+        "MainBehavior",
+        "BranchBehavior",
+    ]
+    assert [statement.operator for statement in graph.statements] == [
+        "parallel",
+        "choose",
+    ]
+    assert compact["nodes"]["X:BranchBehavior:1"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "BranchBehavior",
+    }
+    trace = sample_from_graph(graph)
+    assert trace[0] == "BranchBehavior"
+    assert trace[1] in {"LeafA", "LeafB"}
 
 
 def test_analyze_scenic_composition_includes_local_scenic_imports(tmp_path):

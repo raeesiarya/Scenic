@@ -149,6 +149,8 @@ OPERATOR_INFO = {
     scenic_ast.Do: ("parallel", "parallel-all"),
     scenic_ast.DoChoose: ("choose", "single-enabled-choice"),
     scenic_ast.DoShuffle: ("shuffle", "random-permutation-of-enabled-choices"),
+    scenic_ast.DoUntil: ("until", "parallel-all-until-condition"),
+    scenic_ast.DoFor: ("for", "parallel-all-for-duration"),
 }
 
 
@@ -483,7 +485,7 @@ def sample_composition(
 
     if not invocation_ids:
         return []
-    if operator == "parallel":
+    if operator in {"parallel", "until", "for"}:
         chosen = invocation_ids
     elif operator == "choose":
         chosen = [choose_invocation(invocation_ids, invocation_nodes)]

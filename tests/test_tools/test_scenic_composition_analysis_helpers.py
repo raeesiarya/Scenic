@@ -36,6 +36,14 @@ SCENIC_TEST_STRAIGHT_MAIN = Path("examples/scenic_tests/case_straight/main.sceni
 SCENIC_TEST_STRAIGHT_HELPER1 = Path("examples/scenic_tests/case_straight/helper1.scenic")
 SCENIC_TEST_STRAIGHT_HELPER2 = Path("examples/scenic_tests/case_straight/helper2.scenic")
 SCENIC_TEST_STRAIGHT_HELPER3 = Path("examples/scenic_tests/case_straight/helper3.scenic")
+SCENIC_TEST_SCENARIO_MAIN = Path("examples/scenic_tests/case_scenario/main.scenic")
+SCENIC_TEST_SCENARIO_HELPER1 = Path("examples/scenic_tests/case_scenario/helper1.scenic")
+SCENIC_TEST_INTERRUPT_MAIN = Path(
+    "examples/scenic_tests/case_interrupt_temporal/main.scenic"
+)
+SCENIC_TEST_MONITOR_MAIN = Path(
+    "examples/scenic_tests/case_monitor_require/main.scenic"
+)
 
 
 EXAMPLE_CASES = [
@@ -383,6 +391,111 @@ def test_extract_from_parser_captures_case_straight_helper_chain():
     ]
 
 
+def test_extract_from_parser_captures_case_scenario_main_and_helper():
+    main_containers, main_statements = extract_from_parser(
+        SCENIC_TEST_SCENARIO_MAIN.read_text()
+    )
+    helper_containers, helper_statements = extract_from_parser(
+        SCENIC_TEST_SCENARIO_HELPER1.read_text()
+    )
+
+    assert [container.name for container in main_containers] == [
+        "<initial>",
+        "Main",
+        "LocalScenario",
+        "AlternateScenario",
+        "LocalBehavior",
+    ]
+    assert [container.kind for container in main_containers] == [
+        "initial",
+        "scenario",
+        "scenario",
+        "scenario",
+        "behavior",
+    ]
+    assert [statement.container_name for statement in main_statements] == [
+        "Main",
+        "Main",
+        "LocalScenario",
+        "AlternateScenario",
+    ]
+    assert [statement.operator for statement in main_statements] == [
+        "parallel",
+        "choose",
+        "parallel",
+        "parallel",
+    ]
+    assert [container.name for container in helper_containers] == [
+        "<initial>",
+        "ImportedBehavior",
+        "ImportedScenario",
+        "ImportedLeaf",
+    ]
+    assert [container.kind for container in helper_containers] == [
+        "initial",
+        "behavior",
+        "scenario",
+        "behavior",
+    ]
+    assert [statement.container_name for statement in helper_statements] == [
+        "ImportedBehavior",
+        "ImportedScenario",
+    ]
+
+
+def test_extract_from_parser_captures_interrupt_and_temporal_constructs():
+    containers, statements = extract_from_parser(SCENIC_TEST_INTERRUPT_MAIN.read_text())
+
+    assert [container.name for container in containers] == [
+        "<initial>",
+        "MainBehavior",
+        "BaseBehavior",
+        "InterruptBehavior",
+        "TimedBehavior",
+    ]
+    assert [statement.node_id for statement in statements] == [
+        "MainBehavior:1",
+        "MainBehavior:2",
+        "MainBehavior:3",
+    ]
+    assert [statement.operator for statement in statements] == [
+        "parallel",
+        "until",
+        "for",
+    ]
+    assert statements[0].nesting == ("try",)
+    assert statements[1].nesting == (
+        "try",
+        "interrupt when simulation().currentTime > 1",
+    )
+    assert statements[2].nesting == (
+        "try",
+        "interrupt when simulation().currentTime > 1",
+    )
+    assert [inv.target for inv in statements[1].invocations] == ["InterruptBehavior"]
+    assert [inv.target for inv in statements[2].invocations] == ["TimedBehavior"]
+
+
+def test_extract_from_parser_tolerates_monitor_require_case_and_collects_behaviors():
+    containers, statements = extract_from_parser(SCENIC_TEST_MONITOR_MAIN.read_text())
+
+    assert [container.name for container in containers] == [
+        "<initial>",
+        "MainBehavior",
+        "BranchBehavior",
+        "LeafA",
+        "LeafB",
+    ]
+    assert [statement.container_name for statement in statements] == [
+        "MainBehavior",
+        "BranchBehavior",
+    ]
+    assert [statement.operator for statement in statements] == [
+        "parallel",
+        "choose",
+    ]
+
+
 def test_target_name_and_parse_weight_helpers():
     assert target_name("FollowLaneBehavior(speed)") == "FollowLaneBehavior"
     assert target_name("CollisionAvoidance()") == "CollisionAvoidance"
@@ -413,6 +526,18 @@ def test_operator_semantics_for_all_supported_operators():
         "execution": "random-permutation-of-enabled-choices",
         "randomized": True,
         "weighted": True,
+    }
+    assert operator_semantics("until", "behavior") == {
+        "container_kind": "behavior",
+        "execution": "parallel-all-until-condition",
+        "randomized": False,
+        "weighted": False,
+    }
+    assert operator_semantics("for", "behavior") == {
+        "container_kind": "behavior",
+        "execution": "parallel-all-for-duration",
+        "randomized": False,
+        "weighted": False,
     }
 
 
