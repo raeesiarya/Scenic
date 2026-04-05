@@ -12,12 +12,30 @@ from tools.scenic_composition_analysis import (
     sample_from_graph,
 )
 
-SCENIC_TEST_MAIN = "examples/scenic_tests/case_interconnected/main.scenic"
-SCENIC_TEST_STRAIGHT = "examples/scenic_tests/case_straight/main.scenic"
-SCENIC_TEST_SCENARIO = "examples/scenic_tests/case_scenario/main.scenic"
-SCENIC_TEST_INTERRUPT = "examples/scenic_tests/case_interrupt_temporal/main.scenic"
-SCENIC_TEST_MONITOR = "examples/scenic_tests/case_monitor_require/main.scenic"
-SCENIC_TEST_WEIGHTED_SHUFFLE = "examples/scenic_tests/case_weighted_shuffle/main.scenic"
+SCENIC_TEST_MAIN = "examples/scenic_tests/cases_simple/case_interconnected/main.scenic"
+SCENIC_TEST_STRAIGHT = "examples/scenic_tests/cases_simple/case_straight/main.scenic"
+SCENIC_TEST_SCENARIO = "examples/scenic_tests/cases_simple/case_scenario/main.scenic"
+SCENIC_TEST_INTERRUPT = (
+    "examples/scenic_tests/cases_simple/case_interrupt_temporal/main.scenic"
+)
+SCENIC_TEST_MONITOR = (
+    "examples/scenic_tests/cases_simple/case_monitor_require/main.scenic"
+)
+SCENIC_TEST_WEIGHTED_SHUFFLE = (
+    "examples/scenic_tests/cases_simple/case_weighted_shuffle/main.scenic"
+)
+REALISTIC_CASES = [
+    "examples/scenic_tests/cases_realistic/black_ice_ramp/main.scenic",
+    "examples/scenic_tests/cases_realistic/broken_lights_intersection/main.scenic",
+    "examples/scenic_tests/cases_realistic/child_darting/main.scenic",
+    "examples/scenic_tests/cases_realistic/debris_cascade/main.scenic",
+    "examples/scenic_tests/cases_realistic/emergency_merge/main.scenic",
+    "examples/scenic_tests/cases_realistic/jackknife_rain/main.scenic",
+    "examples/scenic_tests/cases_realistic/pileup_fog/main.scenic",
+    "examples/scenic_tests/cases_realistic/tunnel_exit_glare/main.scenic",
+    "examples/scenic_tests/cases_realistic/urban_conflict/main.scenic",
+    "examples/scenic_tests/cases_realistic/wrong_way_freeway/main.scenic",
+]
 
 
 GRAPH_CASES = [
@@ -1164,6 +1182,56 @@ def test_case_weighted_shuffle_sampling_biases_heavier_item_earlier():
             light_first += 1
 
     assert heavy_first > light_first
+
+
+@pytest.mark.parametrize("path_str", REALISTIC_CASES)
+def test_realistic_cases_analyze_build_and_sample_end_to_end(path_str):
+    graph = analyze_scenic_composition(path_str)
+    execution = build_execution_structure(graph)
+    sxo = build_sxo_structure(graph)
+    compact = build_compact_graph_dict(graph)
+    output = build_analysis_output(path_str)
+    sample = sample_from_graph(graph)
+
+    assert graph.source_kind == "path"
+    assert graph.source_path and graph.source_path.endswith("main.scenic")
+    assert len(graph.container_names) >= 10
+    assert "Main" in graph.container_names
+    assert len(graph.statements) >= 10
+    assert any(statement.operator == "choose" for statement in graph.statements)
+    assert any(statement.operator == "shuffle" for statement in graph.statements)
+    assert any(statement.operator == "until" for statement in graph.statements)
+    assert any(statement.operator == "for" for statement in graph.statements)
+
+    edge_kinds = [edge.kind for edge in graph.edges]
+    assert "contains" in edge_kinds
+    assert "invokes" in edge_kinds
+    assert "next" in edge_kinds
+
+    assert "scenario:Main" in execution.containers
+    assert execution.containers["scenario:Main"]["start_ids"]
+
+    sxo_edge_kinds = [edge.kind for edge in sxo.edges]
+    assert "S_to_X" in sxo_edge_kinds
+    assert "X_to_O" in sxo_edge_kinds
+    assert "O_targets_S" in sxo_edge_kinds
+
+    assert "S:scenario:Main" in compact["nodes"]
+    assert any(edge["type"] == "O_targets_S" for edge in compact["edges"])
+    assert any(edge["type"] == "X_to_O" and "weight" in edge for edge in compact["edges"])
+
+    assert sample
+    assert isinstance(sample[0], str)
+
+    assert set(output.keys()) == {
+        "graph",
+        "execution_structure",
+        "sxo_structure",
+        "compact_graph",
+        "sample_trace",
+    }
+    assert output["graph"]["container_names"][1] == "Main"
+    assert output["sample_trace"]
 
 
 def test_analyze_scenic_composition_includes_local_scenic_imports(tmp_path):

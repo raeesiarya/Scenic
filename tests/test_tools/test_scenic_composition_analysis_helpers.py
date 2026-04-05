@@ -27,27 +27,63 @@ from tools.scenic_composition_analysis_helpers import (
     weighted_shuffle_invocations,
 )
 
-SCENIC_TEST_MAIN = Path("examples/scenic_tests/case_interconnected/main.scenic")
-SCENIC_TEST_HELPER1 = Path("examples/scenic_tests/case_interconnected/helper1.scenic")
-SCENIC_TEST_HELPER2 = Path("examples/scenic_tests/case_interconnected/helper2.scenic")
-SCENIC_TEST_HELPER3 = Path("examples/scenic_tests/case_interconnected/helper3.scenic")
-SCENIC_TEST_HELPER4 = Path("examples/scenic_tests/case_interconnected/helper4.scenic")
-SCENIC_TEST_HELPER5 = Path("examples/scenic_tests/case_interconnected/helper5.scenic")
-SCENIC_TEST_STRAIGHT_MAIN = Path("examples/scenic_tests/case_straight/main.scenic")
-SCENIC_TEST_STRAIGHT_HELPER1 = Path("examples/scenic_tests/case_straight/helper1.scenic")
-SCENIC_TEST_STRAIGHT_HELPER2 = Path("examples/scenic_tests/case_straight/helper2.scenic")
-SCENIC_TEST_STRAIGHT_HELPER3 = Path("examples/scenic_tests/case_straight/helper3.scenic")
-SCENIC_TEST_SCENARIO_MAIN = Path("examples/scenic_tests/case_scenario/main.scenic")
-SCENIC_TEST_SCENARIO_HELPER1 = Path("examples/scenic_tests/case_scenario/helper1.scenic")
+SCENIC_TEST_MAIN = Path(
+    "examples/scenic_tests/cases_simple/case_interconnected/main.scenic"
+)
+SCENIC_TEST_HELPER1 = Path(
+    "examples/scenic_tests/cases_simple/case_interconnected/helper1.scenic"
+)
+SCENIC_TEST_HELPER2 = Path(
+    "examples/scenic_tests/cases_simple/case_interconnected/helper2.scenic"
+)
+SCENIC_TEST_HELPER3 = Path(
+    "examples/scenic_tests/cases_simple/case_interconnected/helper3.scenic"
+)
+SCENIC_TEST_HELPER4 = Path(
+    "examples/scenic_tests/cases_simple/case_interconnected/helper4.scenic"
+)
+SCENIC_TEST_HELPER5 = Path(
+    "examples/scenic_tests/cases_simple/case_interconnected/helper5.scenic"
+)
+SCENIC_TEST_STRAIGHT_MAIN = Path(
+    "examples/scenic_tests/cases_simple/case_straight/main.scenic"
+)
+SCENIC_TEST_STRAIGHT_HELPER1 = Path(
+    "examples/scenic_tests/cases_simple/case_straight/helper1.scenic"
+)
+SCENIC_TEST_STRAIGHT_HELPER2 = Path(
+    "examples/scenic_tests/cases_simple/case_straight/helper2.scenic"
+)
+SCENIC_TEST_STRAIGHT_HELPER3 = Path(
+    "examples/scenic_tests/cases_simple/case_straight/helper3.scenic"
+)
+SCENIC_TEST_SCENARIO_MAIN = Path(
+    "examples/scenic_tests/cases_simple/case_scenario/main.scenic"
+)
+SCENIC_TEST_SCENARIO_HELPER1 = Path(
+    "examples/scenic_tests/cases_simple/case_scenario/helper1.scenic"
+)
 SCENIC_TEST_INTERRUPT_MAIN = Path(
-    "examples/scenic_tests/case_interrupt_temporal/main.scenic"
+    "examples/scenic_tests/cases_simple/case_interrupt_temporal/main.scenic"
 )
 SCENIC_TEST_MONITOR_MAIN = Path(
-    "examples/scenic_tests/case_monitor_require/main.scenic"
+    "examples/scenic_tests/cases_simple/case_monitor_require/main.scenic"
 )
 SCENIC_TEST_WEIGHTED_SHUFFLE_MAIN = Path(
-    "examples/scenic_tests/case_weighted_shuffle/main.scenic"
+    "examples/scenic_tests/cases_simple/case_weighted_shuffle/main.scenic"
 )
+REALISTIC_CASE_MAIN_PATHS = [
+    Path("examples/scenic_tests/cases_realistic/black_ice_ramp/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/broken_lights_intersection/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/child_darting/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/debris_cascade/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/emergency_merge/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/jackknife_rain/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/pileup_fog/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/tunnel_exit_glare/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/urban_conflict/main.scenic"),
+    Path("examples/scenic_tests/cases_realistic/wrong_way_freeway/main.scenic"),
+]
 
 
 EXAMPLE_CASES = [
@@ -118,6 +154,15 @@ def test_load_source_from_main_scenic_test_path():
     assert "behavior MainBehavior" in text
     assert "do ImportedBranch()" in text
     assert source_path == SCENIC_TEST_MAIN.resolve()
+    assert source_kind == "path"
+
+
+@pytest.mark.parametrize("path_obj", REALISTIC_CASE_MAIN_PATHS)
+def test_load_source_from_each_realistic_main(path_obj):
+    text, source_path, source_kind = load_source(path_obj)
+
+    assert "scenario Main():" in text
+    assert source_path == path_obj.resolve()
     assert source_kind == "path"
 
 
@@ -526,6 +571,17 @@ def test_extract_from_parser_captures_weighted_shuffle_case():
     ]
     assert [inv.weight for inv in statements[1].invocations] == [3.0, 1.0]
     assert all(inv.is_weighted for inv in statements[1].invocations)
+
+
+@pytest.mark.parametrize("path_obj", REALISTIC_CASE_MAIN_PATHS)
+def test_extract_from_parser_captures_realistic_case_structure(path_obj):
+    containers, statements = extract_from_parser(path_obj.read_text())
+
+    assert [container.name for container in containers] == ["<initial>", "Main"]
+    assert [container.kind for container in containers] == ["initial", "scenario"]
+    assert [statement.container_name for statement in statements] == ["Main", "Main"]
+    assert [statement.operator for statement in statements] == ["parallel", "parallel"]
+    assert [statement.node_id for statement in statements] == ["Main:1", "Main:2"]
 
 
 def test_target_name_and_parse_weight_helpers():
