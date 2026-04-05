@@ -4,9 +4,16 @@ import pytest
 
 from tools.scenic_composition_analysis import (
     analyze_scenic_composition,
+    build_execution_structure,
     build_compact_graph_dict,
+    build_analysis_output,
+    build_sxo_structure,
     find_composition_statements,
+    sample_from_graph,
 )
+
+SCENIC_TEST_MAIN = "examples/scenic_tests/case_interconnected/main.scenic"
+SCENIC_TEST_STRAIGHT = "examples/scenic_tests/case_straight/main.scenic"
 
 
 GRAPH_CASES = [
@@ -405,3 +412,574 @@ def test_build_compact_graph_dict_adds_uniform_probabilities_for_choose():
 
     assert len(choose_edges) == 2
     assert {edge["probability"] for edge in choose_edges} == {0.5}
+
+
+def test_sample_from_graph_recurses_into_invoked_containers():
+    graph = analyze_scenic_composition(
+        "behavior MainBehavior():\n"
+        "    do HelperBehavior()\n\n"
+        "behavior HelperBehavior():\n"
+        "    do LeafBehavior()\n"
+    )
+
+    assert sample_from_graph(graph) == ["HelperBehavior", "LeafBehavior"]
+
+
+def test_main_scenic_builds_full_recursive_graph():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+
+    assert graph.container_names == (
+        "<initial>",
+        "MainBehavior",
+        "LocalBranch",
+        "LocalA",
+        "LocalB",
+        "LocalLeaf",
+        "ShuffleTail",
+        "TailA",
+        "TailB",
+        "ImportedBranch",
+        "WeightedA",
+        "Helper2Leaf",
+        "Helper2Shuffle",
+        "Helper4Bridge",
+        "Helper4Leaf",
+        "SharedLeaf",
+        "Helper5Bridge",
+        "Helper5Leaf",
+        "WeightedB",
+    )
+    assert [statement.container_name for statement in graph.statements] == [
+        "MainBehavior",
+        "MainBehavior",
+        "MainBehavior",
+        "LocalBranch",
+        "LocalA",
+        "LocalB",
+        "ShuffleTail",
+        "ImportedBranch",
+        "WeightedA",
+        "Helper2Shuffle",
+        "Helper4Bridge",
+        "Helper5Bridge",
+        "WeightedB",
+    ]
+    assert [statement.operator for statement in graph.statements] == [
+        "parallel",
+        "parallel",
+        "parallel",
+        "choose",
+        "parallel",
+        "parallel",
+        "shuffle",
+        "choose",
+        "parallel",
+        "shuffle",
+        "parallel",
+        "parallel",
+        "choose",
+    ]
+    assert [statement.node_id for statement in graph.statements] == [
+        "MainBehavior:1",
+        "MainBehavior:2",
+        "MainBehavior:3",
+        "LocalBranch:1",
+        "LocalA:1",
+        "LocalB:1",
+        "ShuffleTail:1",
+        "ImportedBranch:1",
+        "WeightedA:1",
+        "Helper2Shuffle:1",
+        "Helper4Bridge:1",
+        "Helper5Bridge:1",
+        "WeightedB:1",
+    ]
+
+
+def test_main_scenic_contains_expected_random_and_weighted_invocations():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+    by_container = {statement.container_name: statement for statement in graph.statements}
+
+    local_branch = by_container["LocalBranch"]
+    imported = by_container["ImportedBranch"]
+    shuffle_tail = by_container["ShuffleTail"]
+    weighted_b = by_container["WeightedB"]
+    helper2_shuffle = by_container["Helper2Shuffle"]
+
+    assert [inv.target for inv in local_branch.invocations] == ["LocalA", "LocalB"]
+    assert [inv.weight for inv in local_branch.invocations] == [None, None]
+
+    assert [inv.target for inv in imported.invocations] == ["WeightedA", "WeightedB"]
+    assert [inv.weight for inv in imported.invocations] == [2.0, 1.0]
+    assert all(inv.is_weighted for inv in imported.invocations)
+
+    assert [inv.target for inv in shuffle_tail.invocations] == ["TailA", "TailB"]
+    assert [inv.target for inv in weighted_b.invocations] == [
+        "Helper4Bridge",
+        "Helper5Bridge",
+    ]
+    assert [inv.weight for inv in weighted_b.invocations] == [3.0, 1.0]
+    assert [inv.target for inv in helper2_shuffle.invocations] == [
+        "Helper4Leaf",
+        "Helper5Leaf",
+    ]
+
+
+def test_main_scenic_graph_has_expected_next_edges_only_for_main_behavior():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+
+    next_edges = [edge for edge in graph.edges if edge.kind == "next"]
+
+    assert [(edge.source, edge.target) for edge in next_edges] == [
+        ("MainBehavior:1", "MainBehavior:2"),
+        ("MainBehavior:2", "MainBehavior:3"),
+    ]
+    assert [edge.attributes["within"] for edge in next_edges] == [
+        "MainBehavior",
+        "MainBehavior",
+    ]
+
+
+def test_main_scenic_execution_structure_has_expected_start_points_and_invocations():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+    execution = build_execution_structure(graph)
+
+    assert execution.container_ids[0] == "initial:<initial>"
+    assert execution.containers["behavior:MainBehavior"]["start_ids"] == [
+        "MainBehavior:1"
+    ]
+    assert execution.compositions["MainBehavior:1"]["next_ids"] == ["MainBehavior:2"]
+    assert execution.compositions["MainBehavior:2"]["next_ids"] == ["MainBehavior:3"]
+    assert execution.compositions["ImportedBranch:1"]["invocation_ids"] == [
+        "ImportedBranch:1:invocation:0",
+        "ImportedBranch:1:invocation:1",
+    ]
+    assert execution.invocations["ImportedBranch:1:invocation:0"].attributes["weight"] == 2.0
+    assert execution.invocations["ImportedBranch:1:invocation:1"].attributes["weight"] == 1.0
+    assert execution.compositions["WeightedB:1"]["invocation_ids"] == [
+        "WeightedB:1:invocation:0",
+        "WeightedB:1:invocation:1",
+    ]
+    assert execution.invocations["WeightedB:1:invocation:0"].attributes["weight"] == 3.0
+    assert execution.invocations["WeightedB:1:invocation:1"].attributes["weight"] == 1.0
+
+
+def test_main_scenic_sxo_structure_has_recursive_and_weighted_edges():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+    sxo = build_sxo_structure(graph)
+
+    node_ids = {node.id for node in sxo.nodes}
+    edge_triples = {(edge.source, edge.target, edge.kind) for edge in sxo.edges}
+
+    assert "S:behavior:ImportedBranch" in node_ids
+    assert "X:ImportedBranch:1" in node_ids
+    assert "O:ImportedBranch:1:invocation:0" in node_ids
+
+    assert (
+        "O:MainBehavior:2:invocation:0",
+        "S:behavior:ImportedBranch",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:ImportedBranch:1:invocation:0",
+        "S:behavior:WeightedA",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:ImportedBranch:1:invocation:1",
+        "S:behavior:WeightedB",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:WeightedB:1:invocation:0",
+        "S:behavior:Helper4Bridge",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:WeightedB:1:invocation:1",
+        "S:behavior:Helper5Bridge",
+        "O_targets_S",
+    ) in edge_triples
+    weighted_edges = {
+        (edge.source, edge.target): edge.attributes["weight"]
+        for edge in sxo.edges
+        if edge.kind == "X_to_O" and edge.attributes.get("weight") is not None
+    }
+    assert weighted_edges == {
+        ("X:ImportedBranch:1", "O:ImportedBranch:1:invocation:0"): 2.0,
+        ("X:ImportedBranch:1", "O:ImportedBranch:1:invocation:1"): 1.0,
+        ("X:WeightedB:1", "O:WeightedB:1:invocation:0"): 3.0,
+        ("X:WeightedB:1", "O:WeightedB:1:invocation:1"): 1.0,
+    }
+
+
+def test_main_scenic_compact_graph_has_probabilities_weights_and_recursive_targets():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+    compact = build_compact_graph_dict(graph)
+
+    assert compact["nodes"]["X:LocalBranch:1"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "LocalBranch",
+    }
+    assert compact["nodes"]["X:ImportedBranch:1"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "ImportedBranch",
+    }
+    assert compact["nodes"]["X:ShuffleTail:1"] == {
+        "type": "X",
+        "op": "shuffle",
+        "container": "ShuffleTail",
+    }
+    assert compact["nodes"]["X:WeightedB:1"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "WeightedB",
+    }
+
+    compact_edges = {
+        (edge["source"], edge["target"], edge["type"]): edge
+        for edge in compact["edges"]
+    }
+    assert compact_edges[
+        ("X:LocalBranch:1", "O:LocalBranch:1:invocation:0", "X_to_O")
+    ]["probability"] == 0.5
+    assert compact_edges[
+        ("X:LocalBranch:1", "O:LocalBranch:1:invocation:1", "X_to_O")
+    ]["probability"] == 0.5
+    assert compact_edges[
+        ("X:ImportedBranch:1", "O:ImportedBranch:1:invocation:0", "X_to_O")
+    ]["weight"] == 2.0
+    assert compact_edges[
+        ("X:ImportedBranch:1", "O:ImportedBranch:1:invocation:0", "X_to_O")
+    ]["probability"] == pytest.approx(2 / 3)
+    assert compact_edges[
+        ("X:ImportedBranch:1", "O:ImportedBranch:1:invocation:1", "X_to_O")
+    ]["weight"] == 1.0
+    assert compact_edges[
+        ("X:ImportedBranch:1", "O:ImportedBranch:1:invocation:1", "X_to_O")
+    ]["probability"] == pytest.approx(1 / 3)
+    assert compact_edges[
+        ("X:WeightedB:1", "O:WeightedB:1:invocation:0", "X_to_O")
+    ]["weight"] == 3.0
+    assert compact_edges[
+        ("X:WeightedB:1", "O:WeightedB:1:invocation:0", "X_to_O")
+    ]["probability"] == pytest.approx(0.75)
+    assert compact_edges[
+        ("X:WeightedB:1", "O:WeightedB:1:invocation:1", "X_to_O")
+    ]["weight"] == 1.0
+    assert compact_edges[
+        ("X:WeightedB:1", "O:WeightedB:1:invocation:1", "X_to_O")
+    ]["probability"] == pytest.approx(0.25)
+    assert (
+        "O:MainBehavior:2:invocation:0",
+        "S:behavior:ImportedBranch",
+        "O_targets_S",
+    ) in compact_edges
+
+
+def test_main_scenic_sample_trace_is_recursive_and_respects_random_choices():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+
+    for _ in range(20):
+        trace = sample_from_graph(graph)
+        assert trace[0] == "LocalBranch"
+        assert trace[1] in {"LocalA", "LocalB"}
+        assert trace[2] == "LocalLeaf"
+        assert trace[3] == "ImportedBranch"
+        assert trace[4] in {"WeightedA", "WeightedB"}
+        if trace[4] == "WeightedA":
+            assert trace[5:7] == ["Helper4Bridge", "SharedLeaf"]
+            shuffle_index = 7
+        else:
+            assert trace[5] in {"Helper4Bridge", "Helper5Bridge"}
+            if trace[5] == "Helper4Bridge":
+                assert trace[6] == "SharedLeaf"
+            else:
+                assert trace[6] == "Helper2Leaf"
+            shuffle_index = 7
+        assert trace[shuffle_index] == "ShuffleTail"
+        assert trace[shuffle_index + 1 : shuffle_index + 3] in (
+            ["TailA", "TailB"],
+            ["TailB", "TailA"],
+        )
+
+
+def test_main_scenic_sample_trace_can_reach_all_branches():
+    graph = analyze_scenic_composition(SCENIC_TEST_MAIN)
+
+    local_choices = set()
+    imported_choices = set()
+    weighted_b_choices = set()
+    shuffle_orders = set()
+
+    for _ in range(200):
+        trace = sample_from_graph(graph)
+        local_choices.add(trace[1])
+        imported_choices.add(trace[4])
+        if trace[4] == "WeightedB":
+            weighted_b_choices.add(trace[5])
+        shuffle_start = trace.index("ShuffleTail") + 1
+        shuffle_orders.add(tuple(trace[shuffle_start : shuffle_start + 2]))
+
+    assert local_choices == {"LocalA", "LocalB"}
+    assert imported_choices == {"WeightedA", "WeightedB"}
+    assert weighted_b_choices == {"Helper4Bridge", "Helper5Bridge"}
+    assert shuffle_orders == {("TailA", "TailB"), ("TailB", "TailA")}
+
+
+def test_main_scenic_analysis_output_includes_all_layers_and_recursive_data():
+    output = build_analysis_output(SCENIC_TEST_MAIN)
+
+    assert set(output.keys()) == {
+        "graph",
+        "execution_structure",
+        "sxo_structure",
+        "compact_graph",
+        "sample_trace",
+    }
+    assert output["graph"]["container_names"][1] == "MainBehavior"
+    assert "S:behavior:ImportedBranch" in output["compact_graph"]["nodes"]
+    assert any(
+        edge["type"] == "O_targets_S"
+        and edge["target"] == "S:behavior:ImportedBranch"
+        for edge in output["compact_graph"]["edges"]
+    )
+    assert "S:behavior:Helper5Bridge" in output["compact_graph"]["nodes"]
+    assert output["sample_trace"][0] == "LocalBranch"
+
+
+def test_case_straight_builds_linear_recursive_graph():
+    graph = analyze_scenic_composition(SCENIC_TEST_STRAIGHT)
+
+    assert graph.container_names == (
+        "<initial>",
+        "MainBehavior",
+        "LocalStart",
+        "LocalLeft",
+        "LocalRight",
+        "TailShuffle",
+        "TailA",
+        "TailB",
+        "ImportedChain",
+        "Helper2Branch",
+        "Helper3A",
+        "Helper3B",
+        "StraightLeaf",
+    )
+    assert [statement.container_name for statement in graph.statements] == [
+        "MainBehavior",
+        "MainBehavior",
+        "MainBehavior",
+        "LocalStart",
+        "TailShuffle",
+        "ImportedChain",
+        "Helper2Branch",
+        "Helper3A",
+        "Helper3B",
+    ]
+    assert [statement.operator for statement in graph.statements] == [
+        "parallel",
+        "parallel",
+        "parallel",
+        "choose",
+        "shuffle",
+        "parallel",
+        "choose",
+        "parallel",
+        "parallel",
+    ]
+    assert [statement.node_id for statement in graph.statements] == [
+        "MainBehavior:1",
+        "MainBehavior:2",
+        "MainBehavior:3",
+        "LocalStart:1",
+        "TailShuffle:1",
+        "ImportedChain:1",
+        "Helper2Branch:1",
+        "Helper3A:1",
+        "Helper3B:1",
+    ]
+
+
+def test_case_straight_has_expected_linear_recursion_and_weights():
+    graph = analyze_scenic_composition(SCENIC_TEST_STRAIGHT)
+    by_node_id = {statement.node_id: statement for statement in graph.statements}
+
+    assert [inv.target for inv in by_node_id["MainBehavior:1"].invocations] == ["LocalStart"]
+    assert [inv.target for inv in by_node_id["MainBehavior:2"].invocations] == [
+        "ImportedChain"
+    ]
+    assert [inv.target for inv in by_node_id["MainBehavior:3"].invocations] == [
+        "TailShuffle"
+    ]
+    assert [inv.target for inv in by_node_id["LocalStart:1"].invocations] == [
+        "LocalLeft",
+        "LocalRight",
+    ]
+    assert [inv.weight for inv in by_node_id["LocalStart:1"].invocations] == [None, None]
+    assert [inv.target for inv in by_node_id["ImportedChain:1"].invocations] == [
+        "Helper2Branch"
+    ]
+    assert [inv.target for inv in by_node_id["Helper2Branch:1"].invocations] == [
+        "Helper3A",
+        "Helper3B",
+    ]
+    assert [inv.weight for inv in by_node_id["Helper2Branch:1"].invocations] == [2.0, 1.0]
+
+
+def test_case_straight_execution_and_sxo_structures_show_chain():
+    graph = analyze_scenic_composition(SCENIC_TEST_STRAIGHT)
+    execution = build_execution_structure(graph)
+    sxo = build_sxo_structure(graph)
+
+    assert execution.containers["behavior:MainBehavior"]["start_ids"] == ["MainBehavior:1"]
+    assert execution.compositions["MainBehavior:1"]["next_ids"] == ["MainBehavior:2"]
+    assert execution.compositions["MainBehavior:2"]["next_ids"] == ["MainBehavior:3"]
+    assert execution.compositions["Helper2Branch:1"]["invocation_ids"] == [
+        "Helper2Branch:1:invocation:0",
+        "Helper2Branch:1:invocation:1",
+    ]
+
+    edge_triples = {(edge.source, edge.target, edge.kind) for edge in sxo.edges}
+    assert (
+        "O:MainBehavior:2:invocation:0",
+        "S:behavior:ImportedChain",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:ImportedChain:1:invocation:0",
+        "S:behavior:Helper2Branch",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:Helper2Branch:1:invocation:0",
+        "S:behavior:Helper3A",
+        "O_targets_S",
+    ) in edge_triples
+    assert (
+        "O:Helper2Branch:1:invocation:1",
+        "S:behavior:Helper3B",
+        "O_targets_S",
+    ) in edge_triples
+
+
+def test_case_straight_compact_graph_has_probabilities_and_recursive_targets():
+    graph = analyze_scenic_composition(SCENIC_TEST_STRAIGHT)
+    compact = build_compact_graph_dict(graph)
+
+    assert compact["nodes"]["X:LocalStart:1"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "LocalStart",
+    }
+    assert compact["nodes"]["X:Helper2Branch:1"] == {
+        "type": "X",
+        "op": "choose",
+        "container": "Helper2Branch",
+    }
+    compact_edges = {
+        (edge["source"], edge["target"], edge["type"]): edge
+        for edge in compact["edges"]
+    }
+    assert compact_edges[
+        ("X:LocalStart:1", "O:LocalStart:1:invocation:0", "X_to_O")
+    ]["probability"] == 0.5
+    assert compact_edges[
+        ("X:LocalStart:1", "O:LocalStart:1:invocation:1", "X_to_O")
+    ]["probability"] == 0.5
+    assert compact_edges[
+        ("X:Helper2Branch:1", "O:Helper2Branch:1:invocation:0", "X_to_O")
+    ]["weight"] == 2.0
+    assert compact_edges[
+        ("X:Helper2Branch:1", "O:Helper2Branch:1:invocation:0", "X_to_O")
+    ]["probability"] == pytest.approx(2 / 3)
+    assert compact_edges[
+        ("X:Helper2Branch:1", "O:Helper2Branch:1:invocation:1", "X_to_O")
+    ]["weight"] == 1.0
+    assert compact_edges[
+        ("X:Helper2Branch:1", "O:Helper2Branch:1:invocation:1", "X_to_O")
+    ]["probability"] == pytest.approx(1 / 3)
+    assert (
+        "O:ImportedChain:1:invocation:0",
+        "S:behavior:Helper2Branch",
+        "O_targets_S",
+    ) in compact_edges
+
+
+def test_case_straight_sample_trace_follows_chain_and_random_choices():
+    graph = analyze_scenic_composition(SCENIC_TEST_STRAIGHT)
+
+    local_choices = set()
+    imported_choices = set()
+    shuffle_orders = set()
+
+    for _ in range(100):
+        trace = sample_from_graph(graph)
+        assert trace[0] == "LocalStart"
+        assert trace[1] in {"LocalLeft", "LocalRight"}
+        local_choices.add(trace[1])
+        assert trace[2] == "ImportedChain"
+        assert trace[3] == "Helper2Branch"
+        assert trace[4] in {"Helper3A", "Helper3B"}
+        imported_choices.add(trace[4])
+        assert trace[5] == "StraightLeaf"
+        assert trace[6] == "TailShuffle"
+        shuffle_orders.add(tuple(trace[7:9]))
+
+    assert local_choices == {"LocalLeft", "LocalRight"}
+    assert imported_choices == {"Helper3A", "Helper3B"}
+    assert shuffle_orders == {("TailA", "TailB"), ("TailB", "TailA")}
+
+
+def test_case_straight_analysis_output_includes_linear_chain():
+    output = build_analysis_output(SCENIC_TEST_STRAIGHT)
+
+    assert set(output.keys()) == {
+        "graph",
+        "execution_structure",
+        "sxo_structure",
+        "compact_graph",
+        "sample_trace",
+    }
+    assert output["graph"]["container_names"][1] == "MainBehavior"
+    assert "S:behavior:ImportedChain" in output["compact_graph"]["nodes"]
+    assert "S:behavior:Helper2Branch" in output["compact_graph"]["nodes"]
+    assert any(
+        edge["type"] == "O_targets_S"
+        and edge["target"] == "S:behavior:Helper2Branch"
+        for edge in output["compact_graph"]["edges"]
+    )
+    assert output["sample_trace"][0] == "LocalStart"
+
+
+def test_analyze_scenic_composition_includes_local_scenic_imports(tmp_path):
+    helper = tmp_path / "helper.scenic"
+    helper.write_text(
+        "behavior ImportedBehavior():\n"
+        "    do LeafBehavior()\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.scenic"
+    main.write_text(
+        "from helper import *\n\n"
+        "behavior MainBehavior():\n"
+        "    do ImportedBehavior()\n",
+        encoding="utf-8",
+    )
+
+    graph = analyze_scenic_composition(main)
+    output = build_analysis_output(main)
+
+    assert graph.container_names == (
+        "<initial>",
+        "MainBehavior",
+        "ImportedBehavior",
+    )
+    assert [statement.container_name for statement in graph.statements] == [
+        "MainBehavior",
+        "ImportedBehavior",
+    ]
+    assert sample_from_graph(graph) == ["ImportedBehavior", "LeafBehavior"]
+    assert "S:behavior:ImportedBehavior" in output["compact_graph"]["nodes"]

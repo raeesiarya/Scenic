@@ -26,6 +26,17 @@ from tools.scenic_composition_analysis_helpers import (
     target_name,
 )
 
+SCENIC_TEST_MAIN = Path("examples/scenic_tests/case_interconnected/main.scenic")
+SCENIC_TEST_HELPER1 = Path("examples/scenic_tests/case_interconnected/helper1.scenic")
+SCENIC_TEST_HELPER2 = Path("examples/scenic_tests/case_interconnected/helper2.scenic")
+SCENIC_TEST_HELPER3 = Path("examples/scenic_tests/case_interconnected/helper3.scenic")
+SCENIC_TEST_HELPER4 = Path("examples/scenic_tests/case_interconnected/helper4.scenic")
+SCENIC_TEST_HELPER5 = Path("examples/scenic_tests/case_interconnected/helper5.scenic")
+SCENIC_TEST_STRAIGHT_MAIN = Path("examples/scenic_tests/case_straight/main.scenic")
+SCENIC_TEST_STRAIGHT_HELPER1 = Path("examples/scenic_tests/case_straight/helper1.scenic")
+SCENIC_TEST_STRAIGHT_HELPER2 = Path("examples/scenic_tests/case_straight/helper2.scenic")
+SCENIC_TEST_STRAIGHT_HELPER3 = Path("examples/scenic_tests/case_straight/helper3.scenic")
+
 
 EXAMPLE_CASES = [
     (
@@ -89,6 +100,33 @@ def test_load_source_from_path():
     assert source_kind == "path"
 
 
+def test_load_source_from_main_scenic_test_path():
+    text, source_path, source_kind = load_source(SCENIC_TEST_MAIN)
+
+    assert "behavior MainBehavior" in text
+    assert "do ImportedBranch()" in text
+    assert source_path == SCENIC_TEST_MAIN.resolve()
+    assert source_kind == "path"
+
+
+@pytest.mark.parametrize(
+    "path_obj, expected_line",
+    [
+        (SCENIC_TEST_HELPER1, "behavior ImportedBranch():"),
+        (SCENIC_TEST_HELPER2, "behavior WeightedA():"),
+        (SCENIC_TEST_HELPER3, "behavior WeightedB():"),
+        (SCENIC_TEST_HELPER4, "behavior Helper4Bridge():"),
+        (SCENIC_TEST_HELPER5, "behavior Helper5Bridge():"),
+    ],
+)
+def test_load_source_from_each_interconnected_helper(path_obj, expected_line):
+    text, source_path, source_kind = load_source(path_obj)
+
+    assert expected_line in text
+    assert source_path == path_obj.resolve()
+    assert source_kind == "path"
+
+
 @pytest.mark.parametrize(
     "path_str, expected_containers, expected_statement_count", EXAMPLE_CASES
 )
@@ -134,6 +172,217 @@ def test_extract_from_parser_captures_try_interrupt_structure():
     assert statements[2].invocations[0].target == "CollisionAvoidance"
 
 
+def test_extract_from_parser_captures_random_and_recursive_local_structure_in_main_scenic():
+    text = SCENIC_TEST_MAIN.read_text()
+
+    containers, statements = extract_from_parser(text)
+
+    assert [container.name for container in containers] == [
+        "<initial>",
+        "MainBehavior",
+        "LocalBranch",
+        "LocalA",
+        "LocalB",
+        "LocalLeaf",
+        "ShuffleTail",
+        "TailA",
+        "TailB",
+    ]
+    assert [statement.container_name for statement in statements] == [
+        "MainBehavior",
+        "MainBehavior",
+        "MainBehavior",
+        "LocalBranch",
+        "LocalA",
+        "LocalB",
+        "ShuffleTail",
+    ]
+    assert [statement.operator for statement in statements] == [
+        "parallel",
+        "parallel",
+        "parallel",
+        "choose",
+        "parallel",
+        "parallel",
+        "shuffle",
+    ]
+    assert [statement.node_id for statement in statements] == [
+        "MainBehavior:1",
+        "MainBehavior:2",
+        "MainBehavior:3",
+        "LocalBranch:1",
+        "LocalA:1",
+        "LocalB:1",
+        "ShuffleTail:1",
+    ]
+
+
+def test_extract_from_parser_captures_weighted_choose_in_helper_scenic():
+    text = SCENIC_TEST_HELPER1.read_text()
+
+    containers, statements = extract_from_parser(text)
+
+    assert [container.name for container in containers] == [
+        "<initial>",
+        "ImportedBranch",
+    ]
+    assert [statement.container_name for statement in statements] == [
+        "ImportedBranch",
+    ]
+    assert [statement.operator for statement in statements] == [
+        "choose",
+    ]
+    imported = statements[0]
+    assert [inv.text for inv in imported.invocations] == ["WeightedA()", "WeightedB()"]
+    assert [inv.target for inv in imported.invocations] == ["WeightedA", "WeightedB"]
+    assert [inv.weight for inv in imported.invocations] == [2.0, 1.0]
+    assert all(inv.is_weighted for inv in imported.invocations)
+
+
+def test_extract_from_parser_captures_helper2_helper3_helper4_helper5_structures():
+    helper2_containers, helper2_statements = extract_from_parser(
+        SCENIC_TEST_HELPER2.read_text()
+    )
+    helper3_containers, helper3_statements = extract_from_parser(
+        SCENIC_TEST_HELPER3.read_text()
+    )
+    helper4_containers, helper4_statements = extract_from_parser(
+        SCENIC_TEST_HELPER4.read_text()
+    )
+    helper5_containers, helper5_statements = extract_from_parser(
+        SCENIC_TEST_HELPER5.read_text()
+    )
+
+    assert [container.name for container in helper2_containers] == [
+        "<initial>",
+        "WeightedA",
+        "Helper2Leaf",
+        "Helper2Shuffle",
+    ]
+    assert [statement.container_name for statement in helper2_statements] == [
+        "WeightedA",
+        "Helper2Shuffle",
+    ]
+    assert [statement.operator for statement in helper2_statements] == [
+        "parallel",
+        "shuffle",
+    ]
+    assert [inv.target for inv in helper2_statements[1].invocations] == [
+        "Helper4Leaf",
+        "Helper5Leaf",
+    ]
+
+    assert [container.name for container in helper3_containers] == [
+        "<initial>",
+        "WeightedB",
+    ]
+    assert [statement.container_name for statement in helper3_statements] == [
+        "WeightedB"
+    ]
+    assert helper3_statements[0].operator == "choose"
+    assert [inv.target for inv in helper3_statements[0].invocations] == [
+        "Helper4Bridge",
+        "Helper5Bridge",
+    ]
+    assert [inv.weight for inv in helper3_statements[0].invocations] == [3.0, 1.0]
+
+    assert [container.name for container in helper4_containers] == [
+        "<initial>",
+        "Helper4Bridge",
+        "Helper4Leaf",
+        "SharedLeaf",
+    ]
+    assert [statement.container_name for statement in helper4_statements] == [
+        "Helper4Bridge"
+    ]
+    assert helper4_statements[0].invocations[0].target == "SharedLeaf"
+
+    assert [container.name for container in helper5_containers] == [
+        "<initial>",
+        "Helper5Bridge",
+        "Helper5Leaf",
+    ]
+    assert [statement.container_name for statement in helper5_statements] == [
+        "Helper5Bridge"
+    ]
+    assert helper5_statements[0].invocations[0].target == "Helper2Leaf"
+
+
+def test_extract_from_parser_captures_case_straight_local_structure():
+    containers, statements = extract_from_parser(SCENIC_TEST_STRAIGHT_MAIN.read_text())
+
+    assert [container.name for container in containers] == [
+        "<initial>",
+        "MainBehavior",
+        "LocalStart",
+        "LocalLeft",
+        "LocalRight",
+        "TailShuffle",
+        "TailA",
+        "TailB",
+    ]
+    assert [statement.container_name for statement in statements] == [
+        "MainBehavior",
+        "MainBehavior",
+        "MainBehavior",
+        "LocalStart",
+        "TailShuffle",
+    ]
+    assert [statement.operator for statement in statements] == [
+        "parallel",
+        "parallel",
+        "parallel",
+        "choose",
+        "shuffle",
+    ]
+
+
+def test_extract_from_parser_captures_case_straight_helper_chain():
+    helper1_containers, helper1_statements = extract_from_parser(
+        SCENIC_TEST_STRAIGHT_HELPER1.read_text()
+    )
+    helper2_containers, helper2_statements = extract_from_parser(
+        SCENIC_TEST_STRAIGHT_HELPER2.read_text()
+    )
+    helper3_containers, helper3_statements = extract_from_parser(
+        SCENIC_TEST_STRAIGHT_HELPER3.read_text()
+    )
+
+    assert [container.name for container in helper1_containers] == [
+        "<initial>",
+        "ImportedChain",
+    ]
+    assert [statement.container_name for statement in helper1_statements] == [
+        "ImportedChain"
+    ]
+    assert helper1_statements[0].invocations[0].target == "Helper2Branch"
+
+    assert [container.name for container in helper2_containers] == [
+        "<initial>",
+        "Helper2Branch",
+    ]
+    assert [statement.container_name for statement in helper2_statements] == [
+        "Helper2Branch"
+    ]
+    assert helper2_statements[0].operator == "choose"
+    assert [inv.target for inv in helper2_statements[0].invocations] == [
+        "Helper3A",
+        "Helper3B",
+    ]
+    assert [inv.weight for inv in helper2_statements[0].invocations] == [2.0, 1.0]
+
+    assert [container.name for container in helper3_containers] == [
+        "<initial>",
+        "Helper3A",
+        "Helper3B",
+        "StraightLeaf",
+    ]
+    assert [statement.container_name for statement in helper3_statements] == [
+        "Helper3A",
+        "Helper3B",
+    ]
+
+
 def test_target_name_and_parse_weight_helpers():
     assert target_name("FollowLaneBehavior(speed)") == "FollowLaneBehavior"
     assert target_name("CollisionAvoidance()") == "CollisionAvoidance"
@@ -142,6 +391,8 @@ def test_target_name_and_parse_weight_helpers():
     assert parse_weight("3") == 3.0
     assert parse_weight("0.25") == 0.25
     assert parse_weight("not-a-number") is None
+    assert target_name("WeightedA()") == "WeightedA"
+    assert parse_weight("2.0") == 2.0
 
 
 def test_operator_semantics_for_all_supported_operators():

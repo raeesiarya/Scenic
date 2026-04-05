@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -152,9 +153,8 @@ def analyze_scenic_composition(source: Union[str, Path]) -> CompositionGraph:
     Returns:
         CompositionGraph: The analyzed composition graph.
     """
-
     text, source_path, source_kind = load_source(source)
-    containers, statements = extract_from_parser(text)
+    containers, statements = _extract_recursive(text, source_path)
 
     return build_graph(
         source_path=source_path,
@@ -176,6 +176,105 @@ def find_composition_statements(
         Tuple[CompositionStatement, ...]: The list of composition statements.
     """
     return analyze_scenic_composition(source).statements
+
+
+def _extract_recursive(
+    text: str,
+    source_path: Optional[Path],
+    visited: Optional[set[Path]] = None,
+) -> Tuple[List[Container], List[CompositionStatement]]:
+    """Extract local containers/statements and merge in local Scenic-file dependencies."""
+
+    containers, statements = extract_from_parser(text)
+    if source_path is None:
+        return containers, statements
+
+    if visited is None:
+        visited = set()
+    resolved_path = source_path.resolve()
+    if resolved_path in visited:
+        return [], []
+    visited.add(resolved_path)
+
+    merged_containers = list(containers)
+    merged_statements = list(statements)
+    seen_containers = {(container.kind, container.name) for container in containers}
+
+    for dependency_path in _find_local_scenic_dependencies(text, resolved_path):
+        dep_text, _, _ = load_source(dependency_path)
+        dep_containers, dep_statements = _extract_recursive(
+            dep_text, dependency_path, visited
+        )
+        for container in dep_containers:
+            if container.name == "<initial>":
+                continue
+            key = (container.kind, container.name)
+            if key in seen_containers:
+                continue
+            seen_containers.add(key)
+            merged_containers.append(container)
+        imported_statement_ids = {statement.node_id for statement in merged_statements}
+        for statement in dep_statements:
+            if statement.node_id not in imported_statement_ids:
+                merged_statements.append(statement)
+
+    return merged_containers, merged_statements
+
+
+def _find_local_scenic_dependencies(text: str, source_path: Path) -> List[Path]:
+    """Resolve local Scenic imports such as `from helper import *` or `from . import sub`."""
+
+    dependency_paths: List[Path] = []
+    seen_paths = set()
+    source_dir = source_path.parent
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        import_match = re.match(r"^from\s+([.\w]+)\s+import\b", line)
+        if import_match:
+            module_name = import_match.group(1)
+            candidate = _resolve_local_scenic_module(module_name, source_dir)
+            if candidate is not None and candidate not in seen_paths:
+                seen_paths.add(candidate)
+                dependency_paths.append(candidate)
+            continue
+
+        module_match = re.match(r"^import\s+([A-Za-z_][\w]*)\s*$", line)
+        if module_match:
+            candidate = source_dir / f"{module_match.group(1)}.scenic"
+            if candidate.exists():
+                candidate = candidate.resolve()
+                if candidate not in seen_paths:
+                    seen_paths.add(candidate)
+                    dependency_paths.append(candidate)
+
+    return dependency_paths
+
+
+def _resolve_local_scenic_module(module_name: str, source_dir: Path) -> Optional[Path]:
+    """Resolve a Scenic module reference to a local `.scenic` file when possible."""
+
+    if module_name.startswith("scenic."):
+        return None
+    if module_name == "scenic":
+        return None
+
+    if module_name.startswith("."):
+        relative_depth = len(module_name) - len(module_name.lstrip("."))
+        remainder = module_name[relative_depth:]
+        base_dir = source_dir
+        for _ in range(max(relative_depth - 1, 0)):
+            base_dir = base_dir.parent
+        if not remainder:
+            return None
+        candidate = base_dir.joinpath(*remainder.split(".")).with_suffix(".scenic")
+        return candidate.resolve() if candidate.exists() else None
+
+    candidate = source_dir.joinpath(*module_name.split(".")).with_suffix(".scenic")
+    return candidate.resolve() if candidate.exists() else None
 
 
 def build_execution_structure(graph: CompositionGraph) -> ExecutionStructure:
@@ -431,16 +530,71 @@ def sample_from_graph(graph: CompositionGraph) -> List[str]:
     """
 
     execution = build_execution_structure(graph)
-    trace: List[str] = []
+    container_id_by_name = {
+        container["node"].label: container_id
+        for container_id, container in execution.containers.items()
+    }
+    referenced_container_names = {
+        invocation.attributes.get("target")
+        for invocation in execution.invocations.values()
+        if invocation.attributes.get("target") in container_id_by_name
+    }
 
-    for container_id in execution.container_ids:
-        container = execution.containers[container_id]
-        if container["node"].kind not in {"scenario", "behavior"}:
-            continue
-        for composition_id in ordered_compositions(container, execution):
+    entry_container_ids = [
+        container_id
+        for container_id in execution.container_ids
+        if execution.containers[container_id]["node"].kind in {"scenario", "behavior"}
+        and execution.containers[container_id]["node"].label not in referenced_container_names
+    ]
+    if not entry_container_ids:
+        entry_container_ids = [
+            container_id
+            for container_id in execution.container_ids
+            if execution.containers[container_id]["node"].kind in {"scenario", "behavior"}
+        ]
+
+    trace: List[str] = []
+    for container_id in entry_container_ids:
+        trace.extend(
+            _sample_container_recursive(
+                container_id, execution, container_id_by_name, active_containers=set()
+            )
+        )
+
+    return trace
+
+
+def _sample_container_recursive(
+    container_id: str,
+    execution: ExecutionStructure,
+    container_id_by_name: Dict[str, str],
+    active_containers: set[str],
+) -> List[str]:
+    """Sample a container and recursively follow invoked container targets."""
+
+    if container_id in active_containers:
+        return []
+
+    active_containers = set(active_containers)
+    active_containers.add(container_id)
+    trace: List[str] = []
+    container = execution.containers[container_id]
+
+    for composition_id in ordered_compositions(container, execution):
+        sampled_targets = sample_composition(
+            execution.compositions[composition_id], execution.invocations
+        )
+        trace.extend(sampled_targets)
+        for target in sampled_targets:
+            target_container_id = container_id_by_name.get(target)
+            if target_container_id is None:
+                continue
             trace.extend(
-                sample_composition(
-                    execution.compositions[composition_id], execution.invocations
+                _sample_container_recursive(
+                    target_container_id,
+                    execution,
+                    container_id_by_name,
+                    active_containers,
                 )
             )
 
