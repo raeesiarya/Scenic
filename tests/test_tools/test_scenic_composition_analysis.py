@@ -7,6 +7,7 @@ from tools.scenic_composition_analysis import (
     build_execution_structure,
     build_compact_graph_dict,
     build_analysis_output,
+    build_partner_format,
     build_sxo_structure,
     find_composition_statements,
     sample_from_graph,
@@ -759,6 +760,7 @@ def test_main_scenic_analysis_output_includes_all_layers_and_recursive_data():
         "execution_structure",
         "sxo_structure",
         "compact_graph",
+        "partner_format",
         "sample_trace",
     }
     assert output["graph"]["container_names"][1] == "MainBehavior"
@@ -963,6 +965,7 @@ def test_case_straight_analysis_output_includes_linear_chain():
         "execution_structure",
         "sxo_structure",
         "compact_graph",
+        "partner_format",
         "sample_trace",
     }
     assert output["graph"]["container_names"][1] == "MainBehavior"
@@ -1184,12 +1187,58 @@ def test_case_weighted_shuffle_sampling_biases_heavier_item_earlier():
     assert heavy_first > light_first
 
 
+def test_build_partner_format_exports_container_steps_for_straight_case():
+    graph = analyze_scenic_composition(SCENIC_TEST_STRAIGHT)
+    partner = build_partner_format(graph)
+
+    assert partner["entrypoints"] == ["MainBehavior"]
+    assert partner["containers"]["MainBehavior"] == {
+        "kind": "behavior",
+        "steps": ["LocalStart", "ImportedChain", "TailShuffle"],
+    }
+    assert partner["containers"]["LocalStart"] == {
+        "kind": "behavior",
+        "steps": [{"LocalLeft": 0.5, "LocalRight": 0.5}],
+    }
+    assert partner["containers"]["ImportedChain"] == {
+        "kind": "behavior",
+        "steps": ["Helper2Branch"],
+    }
+    assert partner["containers"]["Helper2Branch"] == {
+        "kind": "behavior",
+        "steps": [{"Helper3A": pytest.approx(2 / 3), "Helper3B": pytest.approx(1 / 3)}],
+    }
+
+
+def test_build_partner_format_exports_shuffle_in_structured_form():
+    graph = analyze_scenic_composition(SCENIC_TEST_WEIGHTED_SHUFFLE)
+    partner = build_partner_format(graph)
+
+    assert partner["entrypoints"] == ["MainBehavior"]
+    assert partner["containers"]["MainBehavior"] == {
+        "kind": "behavior",
+        "steps": ["WeightedShuffle"],
+    }
+    assert partner["containers"]["WeightedShuffle"] == {
+        "kind": "behavior",
+        "steps": [
+            {
+                "shuffle": {
+                    "HeavyLeaf": pytest.approx(0.75),
+                    "LightLeaf": pytest.approx(0.25),
+                }
+            }
+        ],
+    }
+
+
 @pytest.mark.parametrize("path_str", REALISTIC_CASES)
 def test_realistic_cases_analyze_build_and_sample_end_to_end(path_str):
     graph = analyze_scenic_composition(path_str)
     execution = build_execution_structure(graph)
     sxo = build_sxo_structure(graph)
     compact = build_compact_graph_dict(graph)
+    partner = build_partner_format(graph)
     output = build_analysis_output(path_str)
     sample = sample_from_graph(graph)
 
@@ -1220,6 +1269,10 @@ def test_realistic_cases_analyze_build_and_sample_end_to_end(path_str):
     assert any(edge["type"] == "O_targets_S" for edge in compact["edges"])
     assert any(edge["type"] == "X_to_O" and "weight" in edge for edge in compact["edges"])
 
+    assert "Main" in partner["containers"]
+    assert partner["containers"]["Main"]["kind"] == "scenario"
+    assert partner["containers"]["Main"]["steps"]
+
     assert sample
     assert isinstance(sample[0], str)
 
@@ -1228,9 +1281,11 @@ def test_realistic_cases_analyze_build_and_sample_end_to_end(path_str):
         "execution_structure",
         "sxo_structure",
         "compact_graph",
+        "partner_format",
         "sample_trace",
     }
     assert output["graph"]["container_names"][1] == "Main"
+    assert output["partner_format"]["containers"]["Main"]["kind"] == "scenario"
     assert output["sample_trace"]
 
 

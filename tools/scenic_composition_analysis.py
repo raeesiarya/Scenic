@@ -439,13 +439,14 @@ def build_sxo_structure(graph: CompositionGraph) -> SXOStructure:
     return SXOStructure(nodes=tuple(sxo_nodes), edges=tuple(sxo_edges))
 
 
-def _choice_probabilities(invocation_ids: Sequence[str], sxo: SXOStructure) -> Dict[str, float]:
+def _choice_probabilities(
+    invocation_ids: Sequence[str], sxo: SXOStructure
+) -> Dict[str, float]:
     """Compute normalized probabilities for a choice node's outgoing O nodes."""
 
     node_by_id = {node.id: node for node in sxo.nodes}
     weights = [
-        node_by_id[node_id].attributes.get("weight")
-        for node_id in invocation_ids
+        node_by_id[node_id].attributes.get("weight") for node_id in invocation_ids
     ]
     if any(weight is not None for weight in weights):
         numeric_weights = [float(weight or 0.0) for weight in weights]
@@ -519,6 +520,118 @@ def build_compact_graph_dict(graph: CompositionGraph) -> Dict[str, Any]:
     }
 
 
+def _execution_choice_probabilities(
+    invocation_ids: Sequence[str], invocation_nodes: Dict[str, GraphNode]
+) -> Dict[str, float]:
+    """Compute normalized probabilities for execution invocations."""
+
+    weights = [
+        invocation_nodes[node_id].attributes.get("weight") for node_id in invocation_ids
+    ]
+    if any(weight is not None for weight in weights):
+        numeric_weights = [
+            float(weight if weight is not None else 1.0) for weight in weights
+        ]
+        total = sum(numeric_weights)
+        if total > 0:
+            return {
+                node_id: weight / total
+                for node_id, weight in zip(invocation_ids, numeric_weights)
+            }
+    if not invocation_ids:
+        return {}
+    uniform = 1.0 / len(invocation_ids)
+    return {node_id: uniform for node_id in invocation_ids}
+
+
+def build_partner_format(graph: CompositionGraph) -> Dict[str, Any]:
+    """Build a lightweight partner-facing container/steps export.
+
+    Each container is represented as a sequence of steps where:
+    - deterministic steps are plain strings
+    - choose steps are bare probability dictionaries
+    - shuffle steps are structured dictionaries to preserve operator meaning
+    """
+
+    execution = build_execution_structure(graph)
+    container_id_by_name = {
+        container["node"].label: container_id
+        for container_id, container in execution.containers.items()
+    }
+    referenced_container_names = {
+        invocation.attributes.get("target")
+        for invocation in execution.invocations.values()
+        if invocation.attributes.get("target") in container_id_by_name
+    }
+    entrypoints = [
+        execution.containers[container_id]["node"].label
+        for container_id in execution.container_ids
+        if execution.containers[container_id]["node"].kind in {"scenario", "behavior"}
+        and execution.containers[container_id]["node"].label
+        not in referenced_container_names
+    ]
+    if not entrypoints:
+        entrypoints = [
+            execution.containers[container_id]["node"].label
+            for container_id in execution.container_ids
+            if execution.containers[container_id]["node"].kind
+            in {"scenario", "behavior"}
+        ]
+
+    containers: Dict[str, Dict[str, Any]] = {}
+    for container_id in execution.container_ids:
+        container = execution.containers[container_id]
+        node = container["node"]
+        if node.kind not in {"scenario", "behavior"}:
+            continue
+
+        steps: List[Any] = []
+        for composition_id in ordered_compositions(container, execution):
+            composition = execution.compositions[composition_id]
+            operator = composition["node"].label
+            invocation_ids = list(composition["invocation_ids"])
+            labels = [
+                execution.invocations[invocation_id].attributes.get("target")
+                or execution.invocations[invocation_id].attributes["text"]
+                for invocation_id in invocation_ids
+            ]
+
+            if operator in {"parallel", "until", "for"}:
+                steps.extend(labels)
+            elif operator == "choose":
+                probabilities = _execution_choice_probabilities(
+                    invocation_ids, execution.invocations
+                )
+                steps.append(
+                    {
+                        label: probabilities[invocation_id]
+                        for invocation_id, label in zip(invocation_ids, labels)
+                    }
+                )
+            elif operator == "shuffle":
+                probabilities = _execution_choice_probabilities(
+                    invocation_ids, execution.invocations
+                )
+                steps.append(
+                    {
+                        "shuffle": {
+                            label: probabilities[invocation_id]
+                            for invocation_id, label in zip(invocation_ids, labels)
+                        }
+                    }
+                )
+
+        containers[node.label] = {
+            "kind": node.kind,
+            "steps": steps,
+        }
+
+    return {
+        "entrypoints": entrypoints,
+        "containers": containers,
+    }
+
+
 def sample_from_graph(graph: CompositionGraph) -> List[str]:
     """Sample a possible execution trace from the composition graph by traversing the execution structure and making random choices at composition and invocation nodes.
 
@@ -544,13 +657,15 @@ def sample_from_graph(graph: CompositionGraph) -> List[str]:
         container_id
         for container_id in execution.container_ids
         if execution.containers[container_id]["node"].kind in {"scenario", "behavior"}
-        and execution.containers[container_id]["node"].label not in referenced_container_names
+        and execution.containers[container_id]["node"].label
+        not in referenced_container_names
     ]
     if not entry_container_ids:
         entry_container_ids = [
             container_id
             for container_id in execution.container_ids
-            if execution.containers[container_id]["node"].kind in {"scenario", "behavior"}
+            if execution.containers[container_id]["node"].kind
+            in {"scenario", "behavior"}
         ]
 
     trace: List[str] = []
@@ -622,6 +737,7 @@ def build_analysis_output(source: Union[str, Path]) -> Dict[str, Any]:
     execution = build_execution_structure(graph)
     sxo = build_sxo_structure(graph)
     compact = build_compact_graph_dict(graph)
+    partner = build_partner_format(graph)
     sample = sample_from_graph(graph)
 
     return {
@@ -629,6 +745,7 @@ def build_analysis_output(source: Union[str, Path]) -> Dict[str, Any]:
         "execution_structure": execution.as_dict(),
         "sxo_structure": sxo.as_dict(),
         "compact_graph": compact,
+        "partner_format": partner,
         "sample_trace": sample,
     }
 
@@ -638,5 +755,5 @@ if __name__ == "__main__":
         raise SystemExit(
             "usage: python tools/scenic_composition_analysis.py <scenic-file>"
         )
-    analysis_output = build_analysis_output(sys.argv[1])
-    print(json.dumps(analysis_output, indent=2))
+    graph = analyze_scenic_composition(sys.argv[1])
+    print(json.dumps(build_partner_format(graph), indent=2))
